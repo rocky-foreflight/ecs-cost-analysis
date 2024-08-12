@@ -4,46 +4,91 @@ import sys
 
 import boto3
 
-ecs_client = boto3.client("ecs")
-ec2_client = boto3.client("ec2")
-sts_client = boto3.client("sts")
-organizations_client = client = boto3.client("organizations")
-
-# Instance data for m5 family
+# Data from: https://aws.amazon.com/ec2/pricing/on-demand/
+# Last updated on 2024-08-08.
 instance_data = {
     "m5.large": {"cost": 0.096, "vcpus": 2, "memory_gib": 8},
     "m5.xlarge": {"cost": 0.192, "vcpus": 4, "memory_gib": 16},
     "m5.2xlarge": {"cost": 0.384, "vcpus": 8, "memory_gib": 32},
     "m5.4xlarge": {"cost": 0.768, "vcpus": 16, "memory_gib": 64},
+    "m5a.xlarge": {"cost": 0.172, "vcpus": 4, "memory_gib": 16},
+    "c5.large": {"cost": 0.085, "vcpus": 2, "memory_gib": 4},
+    "c5.xlarge": {"cost": 0.17, "vcpus": 4, "memory_gib": 8},
+    "c5.2xlarge": {"cost": 0.34, "vcpus": 8, "memory_gib": 16},
+    "c5.4xlarge": {"cost": 0.68, "vcpus": 16, "memory_gib": 32},
+    "c5a.2xlarge": {"cost": 0.308, "vcpus": 8, "memory_gib": 16},
+    "c6a.xlarge": {"cost": 0.153, "vcpus": 4, "memory_gib": 8},
+    "r6a.4xlarge": {"cost": 0.9072, "vcpus": 16, "memory_gib": 128},
+    "t2.large": {"cost": 0.0928, "vcpus": 2, "memory_gib": 8},
+    "t3.small": {"cost": 0.0208, "vcpus": 2, "memory_gib": 2},
+    "t3.medium": {"cost": 0.0416, "vcpus": 2, "memory_gib": 4},
+    "t3.large": {"cost": 0.0832, "vcpus": 2, "memory_gib": 8},
+    "m6in.xlarge": {"cost": 0.27846, "vcpus": 4, "memory_gib": 16},
 }
+
+# Data from: https://aws.amazon.com/savingsplans/compute-pricing/
+# Region: US East (Ohio), Term length: 1 year, Payment options: No Upfront, Operating system: Linux, Tenancy: Shared
+# Savings over On-Demand for a c5.2xlarge is 28%.
+# Last updated on 2024-08-08.
+savings_over_on_demand = 0.28
+
+# According to the AWS Cost Explorer, our average Savings Plans coverage from 2023-08-01 – 2024-07-31 was 78%.
+average_savings_plans_coverage = 0.78
+
+
+def savings_plans_rate_estimation(on_demand_rate):
+    # The portion of the on-demand rate we want to discount.
+    covered_on_demand_rate = on_demand_rate * average_savings_plans_coverage
+    # The portion of the on-demand rate we want to remain the same.
+    not_covered_on_demand_rate = on_demand_rate * (1.0 - average_savings_plans_coverage)
+
+    # Discount a portion of the on-demand rate and then add back the remaining portion of the on-demand rate. This
+    # math should account for the reality that we do not have complete Savings Plans coverage.
+    savings_plans_rate = (
+        covered_on_demand_rate - (covered_on_demand_rate * savings_over_on_demand) + not_covered_on_demand_rate
+    )
+
+    return savings_plans_rate
 
 
 def get_caller_identity():
+    sts_client = boto3.client("sts")
+
     response = sts_client.get_caller_identity()
     return response
 
 
-def describe_account(account_id):
-    response = organizations_client.describe_account(AccountId=account_id)
-    return response["Account"]
+def list_clusters():
+    ecs_client = boto3.client("ecs")
+
+    # Assumes there will never be more than 100 results
+    return ecs_client.list_clusters()["clusterArns"]
 
 
 def list_container_instances(cluster_name):
+    ecs_client = boto3.client("ecs")
+
     response = ecs_client.list_container_instances(cluster=cluster_name)
     return response["containerInstanceArns"]
 
 
 def describe_container_instances(cluster_name, container_instance_arns):
+    ecs_client = boto3.client("ecs")
+
     response = ecs_client.describe_container_instances(cluster=cluster_name, containerInstances=container_instance_arns)
     return response["containerInstances"]
 
 
 def list_tasks(cluster_name):
+    ecs_client = boto3.client("ecs")
+
     response = ecs_client.list_tasks(cluster=cluster_name)
     return response["taskArns"]
 
 
 def describe_tasks(cluster_name, task_arns):
+    ecs_client = boto3.client("ecs")
+
     response = ecs_client.describe_tasks(cluster=cluster_name, tasks=task_arns)
     return response["tasks"]
 
@@ -68,51 +113,57 @@ def calculate_current_usage(container_instances):
     return total_cpu, total_memory, used_cpu, used_memory
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("cluster_name")
-    parser.add_argument("instance_type")
-    args = parser.parse_args()
+def get_instance_type(instance_id):
+    ec2_client = boto3.client("ec2")
 
-    cluster_name = args.cluster_name
-    instance_type = args.instance_type
+    response = ec2_client.describe_instances(InstanceIds=[instance_id])
+    return response["Reservations"][0]["Instances"][0]["InstanceType"]
 
-    caller_identity = get_caller_identity()
-    account_id = caller_identity["Account"]
-    account_name = describe_account(account_id)["Name"]
 
+def cost_analysis(profile, cluster_name):
+    # We grab the container instances first, so we can retrieve the instance type.
+    container_instance_arns = list_container_instances(cluster_name)
+    if len(container_instance_arns) == 0:
+        return 0, 0
+    container_instances = describe_container_instances(cluster_name, container_instance_arns)
+
+    instance_type = get_instance_type(container_instances[0]["ec2InstanceId"])
+
+    account_id = get_caller_identity()["Account"]
+
+    print("_" * 80)
     print(f"{datetime.datetime.now(datetime.timezone.utc)}:")
-    print(f"  {"cluster name":<12} : {cluster_name} ECS cluster")
-    print(f"  {"account":<12} : {account_name} ({account_id})")
+    print(f"  {"AWS profile":<13} : {profile}")
+    print(f"  {"account ID":<13} : {account_id}")
+    print(f"  {"cluster name":<13} : {cluster_name}")
+    print(f"  {"instance type":<13} : {instance_type}")
+    print("_" * 80)
     print()
 
     # Get the task with the largest CPU allocation and the task with the largest memory allocation
     task_arns = list_tasks(cluster_name)
-    tasks = describe_tasks(cluster_name, task_arns)
+    if len(task_arns) > 0:
+        tasks = describe_tasks(cluster_name, task_arns)
 
-    largest_cpu_task = max(tasks, key=lambda x: int(x["cpu"]))
-    largest_memory_task = max(tasks, key=lambda x: int(x["memory"]))
+        largest_cpu_task = max(tasks, key=lambda x: int(x["cpu"]))
+        largest_memory_task = max(tasks, key=lambda x: int(x["memory"]))
 
-    print(f"{instance_type} CPU units: {instance_data[instance_type]["vcpus"] * 1024}")
-    print(f"{instance_type} memory: {instance_data[instance_type]["memory_gib"] * 1024}")
-    print()
+        print(f"{instance_type} CPU units: {instance_data[instance_type]["vcpus"] * 1024}")
+        print(f"{instance_type} memory: {instance_data[instance_type]["memory_gib"] * 1024}")
+        print()
 
-    print(f"Largest task CPU units: {int(largest_cpu_task["cpu"])}")
-    print(f"Largest task memory: {int(largest_memory_task["memory"])}")
-    print()
+        print(f"Largest task CPU units: {int(largest_cpu_task["cpu"])}")
+        print(f"Largest task memory: {int(largest_memory_task["memory"])}")
+        print()
 
-    # Unique values are interesting because we can see values that aren't multiples of 1024 and thus can never fit
-    # evenly into a container instance
-    unique_cpu_values = {int(task["cpu"]) for task in tasks}
-    unique_memory_values = {int(task["memory"]) for task in tasks}
+        # Unique values are interesting because we can see values that aren't multiples of 1024 and thus can never fit
+        # evenly into a container instance
+        unique_cpu_values = {int(task["cpu"]) for task in tasks}
+        unique_memory_values = {int(task["memory"]) for task in tasks}
 
-    print(f"Unique CPU unit values: {unique_cpu_values}")
-    print(f"Unique memory values: {unique_memory_values}")
-    print()
-
-    # Get the total CPU and memory and current usage, then calculate excess
-    container_instance_arns = list_container_instances(cluster_name)
-    container_instances = describe_container_instances(cluster_name, container_instance_arns)
+        print(f"Unique CPU unit values: {unique_cpu_values}")
+        print(f"Unique memory values: {unique_memory_values}")
+        print()
 
     total_cpu, total_memory, used_cpu, used_memory = calculate_current_usage(container_instances)
 
@@ -138,6 +189,52 @@ def main() -> int:
     print(f"Current Cost: ${current_cost_hourly:.0f}/hr OR ${current_cost_hourly * 730:.0f}/mo")
     print(f"An excess of {num_excess_instances:.1f} {instance_type} instances worth of compute")
     print(f"Potential Savings: ${potential_savings_hourly:.0f}/hr OR ${potential_savings_hourly * 730:.0f}/mo")
+    print()
+
+    return current_cost_hourly, potential_savings_hourly
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--aws-profiles", nargs="+", required=True)
+    args = parser.parse_args()
+
+    aws_profiles = args.aws_profiles
+
+    total_clusters = 0
+
+    total_current_cost_hourly = 0
+    total_potential_savings_hourly = 0
+
+    for profile in aws_profiles:
+        boto3.setup_default_session(profile_name=profile)
+
+        for cluster_arn in list_clusters():
+            total_clusters += 1
+            cluster_name = cluster_arn.split(":cluster/")[1]
+
+            current_cost_hourly, potential_savings_hourly = cost_analysis(profile, cluster_name)
+
+            total_current_cost_hourly += current_cost_hourly
+            total_potential_savings_hourly += potential_savings_hourly
+
+    total_current_cost_hourly_with_savings_plan = savings_plans_rate_estimation(total_current_cost_hourly)
+    total_potential_savings_hourly_with_savings_plan = savings_plans_rate_estimation(total_potential_savings_hourly)
+
+    print("_" * 80)
+    print(f"{datetime.datetime.now(datetime.timezone.utc)}:")
+    print(f"  {"AWS profiles":<18} : {len(aws_profiles)}")
+    print(f"  {"clusters processed":<18} : {total_clusters}")
+    print("_" * 80)
+    print()
+
+    print(f"Total Monthly Cost: ${total_current_cost_hourly * 730:.0f}/mo")
+    print(f"Potential Monthly Savings: ${total_potential_savings_hourly * 730:.0f}/mo")
+    print()
+    print(f"Total Monthly Cost (Savings Plan applied): ${total_current_cost_hourly_with_savings_plan * 730:.0f}/mo")
+    print(
+        f"Potential Monthly Savings (Savings Plan applied): ${total_potential_savings_hourly_with_savings_plan * 730:.0f}/mo"
+    )
 
     return 0
 
