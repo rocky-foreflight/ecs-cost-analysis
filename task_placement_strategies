@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+
+import argparse
+import datetime
+import json
+import sys
+from pprint import pprint
+
+import boto3
+
+
+def get_caller_identity():
+    sts_client = boto3.client("sts")
+
+    response = sts_client.get_caller_identity()
+    return response
+
+
+def list_clusters():
+    ecs_client = boto3.client("ecs")
+
+    # Assumes there will never be more than 100 results
+    return ecs_client.list_clusters()["clusterArns"]
+
+
+def list_services(cluster_name):
+    ecs_client = boto3.client("ecs")
+
+    # Assumes there will never be more than 100 results
+    return ecs_client.list_services(cluster=cluster_name, launchType="EC2", maxResults=100)["serviceArns"]
+
+
+def describe_services(cluster_name, service_arns):
+    ecs_client = boto3.client("ecs")
+
+    response = ecs_client.describe_services(cluster=cluster_name, services=service_arns)
+    return response["services"]
+
+
+def placement_strategy_analysis(profile):
+    boto3.setup_default_session(profile_name=profile)
+
+    account_id = get_caller_identity()["Account"]
+
+    print("_" * 80)
+    print(f"{datetime.datetime.now(datetime.timezone.utc)}:")
+    print(f"  {"AWS profile":<11} : {profile}")
+    print(f"  {"account ID":<11} : {account_id}")
+    print("_" * 80)
+    print()
+
+    clusters = list_clusters()
+
+    results_by_cluster = {}
+
+    for cluster_arn in clusters:
+        service_arns = list_services(cluster_arn)
+
+        if len(service_arns) == 0:
+            continue
+
+        unique_placement_strategies = {}
+
+        # boto3 only allows up to 10 services per describe_services operation.
+        while len(service_arns) > 0:
+            first_ten_service_arns = service_arns[:10]
+            service_arns = service_arns[10:]
+
+            services = describe_services(cluster_arn, first_ten_service_arns)
+
+            for service in services:
+                service_name = service["serviceName"]
+                placement_strategy = service["placementStrategy"]
+
+                # We serialize the placement strategy to JSON, so we can obtain a hash of the data. Then,
+                # we use the hash as a key in a dictionary, so we can count how many times we use a particular
+                # placement strategy.
+                serialized_placement_strategy = json.dumps(placement_strategy)
+                placement_strategy_hash = hash(serialized_placement_strategy)
+
+                if placement_strategy_hash in unique_placement_strategies:
+                    unique_placement_strategies[placement_strategy_hash]["services"].append(service_name)
+                else:
+                    unique_placement_strategies.update(
+                        {placement_strategy_hash: {"services": [service_name], "strategy": placement_strategy}}
+                    )
+
+        results_by_cluster.update({cluster_arn: unique_placement_strategies})
+
+    pprint(results_by_cluster)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--aws-profiles", nargs="+", required=True)
+    args = parser.parse_args()
+
+    aws_profiles = args.aws_profiles
+
+    for profile in aws_profiles:
+        placement_strategy_analysis(profile)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
