@@ -87,7 +87,7 @@ def placement_strategy_analysis(profile):
 
         results_by_cluster.update({cluster_arn: unique_placement_strategies})
 
-    pprint(results_by_cluster)
+    print(json.dumps(results_by_cluster, indent=4))
 
 
 def main() -> int:
