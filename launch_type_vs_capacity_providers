@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+
+import argparse
+import datetime
+import json
+import sys
+from pprint import pprint
+import hashlib
+
+import boto3
+
+
+def get_caller_identity():
+    sts_client = boto3.client("sts")
+
+    response = sts_client.get_caller_identity()
+    return response
+
+
+def list_clusters():
+    ecs_client = boto3.client("ecs")
+
+    # Assumes there will never be more than 100 results
+    return ecs_client.list_clusters()["clusterArns"]
+
+
+def list_services(cluster_name):
+    ecs_client = boto3.client("ecs")
+
+    response = ecs_client.list_services(cluster=cluster_name, launchType="EC2")
+    service_arns = response["serviceArns"]
+
+    while "nextToken" in response:
+        response = ecs_client.list_services(cluster=cluster_name, launchType="EC2", nextToken=response["nextToken"])
+        service_arns.extend(response["serviceArns"])
+
+    return service_arns
+
+
+def describe_services(cluster_name, service_arns):
+    ecs_client = boto3.client("ecs")
+
+    response = ecs_client.describe_services(cluster=cluster_name, services=service_arns)
+    return response["services"]
+
+
+def placement_strategy_analysis(profile):
+    boto3.setup_default_session(profile_name=profile)
+
+    account_id = get_caller_identity()["Account"]
+
+    print("_" * 80)
+    print(f"{datetime.datetime.now(datetime.timezone.utc)}:")
+    print(f"  {"AWS profile":<11} : {profile}")
+    print(f"  {"account ID":<11} : {account_id}")
+    print("_" * 80)
+    print()
+
+    clusters = list_clusters()
+
+    results_by_cluster = {}
+
+    for cluster_arn in clusters:
+        service_arns = list_services(cluster_arn)
+
+        if len(service_arns) == 0:
+            continue
+
+        unique_capacity_providers = {}
+        unique_launch_types = {}
+
+        # boto3 only allows up to 10 services per describe_services operation.
+        while len(service_arns) > 0:
+            first_ten_service_arns = service_arns[:10]
+            service_arns = service_arns[10:]
+
+            services = describe_services(cluster_arn, first_ten_service_arns)
+
+            for service in services:
+                service_name = service["serviceName"]
+                launch_type = service.get("launchType")
+                capacity_provider = service.get("capacityProviderStrategy")
+
+                # Aggregate services by launch type.
+                if launch_type is not None:
+                    launch_type_hash = "md5-" + hashlib.md5(launch_type.encode()).hexdigest()
+
+                    if launch_type_hash in unique_launch_types:
+                        unique_launch_types[launch_type_hash]["services"].append(service_name)
+                    else:
+                        unique_launch_types.update(
+                            {launch_type_hash: {"services": [service_name], "launchType": launch_type}}
+                        )
+
+                # Aggregate services by capacity provider strategy.
+                if capacity_provider is not None:
+                    serialized_capacity_provider = json.dumps(capacity_provider)
+                    capacity_provider_hash = "md5-" + hashlib.md5(serialized_capacity_provider.encode()).hexdigest()
+
+                    if capacity_provider_hash in unique_capacity_providers:
+                        unique_capacity_providers[capacity_provider_hash]["services"].append(service_name)
+                    else:
+                        unique_capacity_providers.update(
+                            {
+                                capacity_provider_hash: {
+                                    "services": [service_name],
+                                    "capacityProviderStrategy": capacity_provider,
+                                }
+                            }
+                        )
+
+        results_by_cluster.update(
+            {
+                cluster_arn: {
+                    "unique_capacity_providers": unique_capacity_providers,
+                    "unique_launch_types": unique_launch_types,
+                }
+            }
+        )
+
+    print(json.dumps(results_by_cluster, indent=4))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--aws-profiles", nargs="+", required=True)
+    args = parser.parse_args()
+
+    aws_profiles = args.aws_profiles
+
+    for profile in aws_profiles:
+        placement_strategy_analysis(profile)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
