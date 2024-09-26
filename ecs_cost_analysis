@@ -7,17 +7,21 @@ import sys
 import boto3
 
 # Data from: https://aws.amazon.com/ec2/pricing/on-demand/
-# Last updated on 2024-08-08.
+# Last updated on 2024-08-08. m5.8xlarge, m7a.4xlarge, and c5a.4xlarge updated
+# on 2024-09-25.
 instance_data = {
     "m5.large": {"cost": 0.096, "vcpus": 2, "memory_gib": 8},
     "m5.xlarge": {"cost": 0.192, "vcpus": 4, "memory_gib": 16},
     "m5.2xlarge": {"cost": 0.384, "vcpus": 8, "memory_gib": 32},
     "m5.4xlarge": {"cost": 0.768, "vcpus": 16, "memory_gib": 64},
+    "m5.8xlarge": {"cost": 1.536, "vcpus": 32, "memory_gib": 128},
     "m5a.xlarge": {"cost": 0.172, "vcpus": 4, "memory_gib": 16},
+    "m7a.4xlarge": {"cost": 0.92736, "vcpus": 16, "memory_gib": 64},
     "c5.large": {"cost": 0.085, "vcpus": 2, "memory_gib": 4},
     "c5.xlarge": {"cost": 0.17, "vcpus": 4, "memory_gib": 8},
     "c5.2xlarge": {"cost": 0.34, "vcpus": 8, "memory_gib": 16},
     "c5.4xlarge": {"cost": 0.68, "vcpus": 16, "memory_gib": 32},
+    "c5a.4xlarge": {"cost": 0.616, "vcpus": 16, "memory_gib": 32},
     "c5a.2xlarge": {"cost": 0.308, "vcpus": 8, "memory_gib": 16},
     "c6a.xlarge": {"cost": 0.153, "vcpus": 4, "memory_gib": 8},
     "r6a.4xlarge": {"cost": 0.9072, "vcpus": 16, "memory_gib": 128},
