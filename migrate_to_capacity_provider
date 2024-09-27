@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+
+import argparse
+import hashlib
+import json
+import sys
+
+import boto3
+
+
+def get_caller_identity():
+    sts_client = boto3.client("sts")
+
+    response = sts_client.get_caller_identity()
+    return response
+
+
+def describe_clusters(clusters):
+    ecs_client = boto3.client("ecs")
+
+    return ecs_client.describe_clusters(clusters=clusters)["clusters"]
+
+
+def list_services(cluster_name):
+    ecs_client = boto3.client("ecs")
+
+    response = ecs_client.list_services(cluster=cluster_name, launchType="EC2")
+    service_arns = response["serviceArns"]
+
+    while "nextToken" in response:
+        response = ecs_client.list_services(cluster=cluster_name, launchType="EC2", nextToken=response["nextToken"])
+        service_arns.extend(response["serviceArns"])
+
+    return service_arns
+
+
+def describe_services(cluster_name, service_arns):
+    ecs_client = boto3.client("ecs")
+
+    response = ecs_client.describe_services(cluster=cluster_name, services=service_arns)
+    return response["services"]
+
+
+def update_service_capacity_provider_strategy(cluster_arn, service_arn, capacity_provider_strategy):
+    ecs_client = boto3.client("ecs")
+
+    response = ecs_client.update_service(
+        cluster=cluster_arn,
+        service=service_arn,
+        capacityProviderStrategy=capacity_provider_strategy,
+        # When switching from launch type to capacity provider strategy on an
+        # existing service, or making a change to a capacity provider strategy
+        # on a service that is already using one, you must force a new
+        # deployment.
+        forceNewDeployment=True,
+    )
+    return response
+
+
+def migrate_cluster_to_capacity_provider(profile, cluster_name):
+    boto3.setup_default_session(profile_name=profile)
+
+    updated_service_count = 0
+
+    clusters = describe_clusters([cluster_name])
+
+    if len(clusters) == 0:
+        print(f"No cluster found by the name {cluster_name}.")
+        return
+    elif len(clusters) > 1:
+        print(f"Multiple clusters found by the name {cluster_name}.")
+        return
+
+    cluster = clusters[0]
+    cluster_arn = cluster["clusterArn"]
+
+    default_capacity_provider_strategy = cluster["defaultCapacityProviderStrategy"]
+
+    if default_capacity_provider_strategy is None or len(default_capacity_provider_strategy) == 0:
+        print(f"No default capacity provider defined for cluster {cluster_name}. Unable to perform migration.")
+        return
+
+    print(f"Default capacity provider strategy for {cluster_name} cluster:")
+    print(json.dumps(default_capacity_provider_strategy, indent=4) + "\n")
+
+    service_arns = list_services(cluster_arn)
+
+    if len(service_arns) == 0:
+        print(f"No services in cluster {cluster_name}.")
+
+    # boto3 only allows up to 10 services per describe_services operation.
+    while len(service_arns) > 0:
+        first_ten_service_arns = service_arns[:10]
+        service_arns = service_arns[10:]
+
+        services = describe_services(cluster_arn, first_ten_service_arns)
+
+        for service in services:
+            service_name = service["serviceName"]
+            service_arn = service["serviceArn"]
+            launch_type = service.get("launchType")
+            capacity_provider = service.get("capacityProviderStrategy")
+
+            # TODO: Right now, only act on the fees service! Remove first part
+            # of conditional once we're ready to apply to a larger number of
+            # services.
+            if service_name == "fees-Service-ADp9TpQcI1i9" and capacity_provider is None and launch_type == "EC2":
+                print(
+                    f"Updating {service_name} from {launch_type} launch type to use default capacity provider strategy."
+                )
+                # Note: To revert back to EC2 launch type, pass an empty array
+                # for the capacity provider strategy.
+                response = update_service_capacity_provider_strategy(
+                    cluster_arn, service_arn, default_capacity_provider_strategy
+                )
+
+                if response["ResponseMetadata"]["HTTPStatusCode"] == 200:
+                    print(f"Update successful for {service_name}.")
+                else:
+                    print(f"Error updating {service_name}. Stopping.")
+                    print(json.dumps(response, indent=4, default=str))
+                    break
+
+                updated_service_count += 1
+
+    print(f"\nUpdated {updated_service_count} service(s).")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--aws-profile", required=True)
+    parser.add_argument("--clusters", nargs="+", required=True)
+    args = parser.parse_args()
+
+    aws_profile = args.aws_profile
+    clusters = args.clusters
+
+    for cluster in clusters:
+        migrate_cluster_to_capacity_provider(aws_profile, cluster)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
