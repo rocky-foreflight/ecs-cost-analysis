@@ -98,13 +98,11 @@ def migrate_cluster_to_capacity_provider(profile, cluster_name):
         for service in services:
             service_name = service["serviceName"]
             service_arn = service["serviceArn"]
+            service_type = service["schedulingStrategy"]
             launch_type = service.get("launchType")
             capacity_provider = service.get("capacityProviderStrategy")
 
-            # TODO: Right now, only act on the fees service! Remove first part
-            # of conditional once we're ready to apply to a larger number of
-            # services.
-            if service_name == "fees-Service-ADp9TpQcI1i9" and capacity_provider is None and launch_type == "EC2":
+            if service_type == "REPLICA" and launch_type == "EC2" and capacity_provider is None:
                 print(
                     f"Updating {service_name} from {launch_type} launch type to use default capacity provider strategy."
                 )
