@@ -8,7 +8,7 @@ import boto3
 
 # Data from: https://aws.amazon.com/ec2/pricing/on-demand/
 # Last updated on 2024-08-08. m5.8xlarge, m7a.4xlarge, and c5a.4xlarge updated
-# on 2024-09-25.
+# on 2024-09-25. t3a.medium added on 2024-11-04.
 instance_data = {
     "m5.large": {"cost": 0.096, "vcpus": 2, "memory_gib": 8},
     "m5.xlarge": {"cost": 0.192, "vcpus": 4, "memory_gib": 16},
@@ -29,6 +29,7 @@ instance_data = {
     "t3.small": {"cost": 0.0208, "vcpus": 2, "memory_gib": 2},
     "t3.medium": {"cost": 0.0416, "vcpus": 2, "memory_gib": 4},
     "t3.large": {"cost": 0.0832, "vcpus": 2, "memory_gib": 8},
+    "t3a.medium": {"cost": 0.0376, "vcpus": 2, "memory_gib": 4},
     "m6in.xlarge": {"cost": 0.27846, "vcpus": 4, "memory_gib": 16},
 }
 
