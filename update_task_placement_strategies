@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import sys
+import boto3
+
+
+# The desired placement strategy:
+DESIRED_PLACEMENT_STRATEGY = [
+    {
+        "type": "spread",
+        "field": "attribute:ecs.availability-zone"
+    },
+    {
+        "type": "binpack",
+        "field": "MEMORY"
+    }
+]
+
+
+def describe_clusters(clusters):
+    ecs_client = boto3.client("ecs")
+    return ecs_client.describe_clusters(clusters=clusters)["clusters"]
+
+
+def list_services_all(cluster_name):
+    """
+    List all services (regardless of launch type) in the cluster.
+    """
+    ecs_client = boto3.client("ecs")
+    service_arns = []
+
+    response = ecs_client.list_services(cluster=cluster_name)
+    service_arns.extend(response["serviceArns"])
+
+    while "nextToken" in response:
+        response = ecs_client.list_services(
+            cluster=cluster_name,
+            nextToken=response["nextToken"]
+        )
+        service_arns.extend(response["serviceArns"])
+
+    return service_arns
+
+
+def describe_services(cluster_name, service_arns):
+    """
+    Describe up to 10 services at a time (API limit).
+    """
+    ecs_client = boto3.client("ecs")
+    response = ecs_client.describe_services(cluster=cluster_name, services=service_arns)
+    return response["services"]
+
+
+def update_service_placement_strategy(cluster_arn, service_arn, placement_strategy, dry_run=False):
+    """
+    Update the placement strategy of a service in the specified cluster,
+    unless dry_run=True, in which case just log the intended change.
+    """
+    if dry_run:
+        print(
+            f"DRY RUN: Would call update_service for {service_arn} "
+            f"with placementStrategy={placement_strategy}"
+        )
+        return {"ResponseMetadata": {"HTTPStatusCode": 200}}  # Mock success
+
+    ecs_client = boto3.client("ecs")
+    response = ecs_client.update_service(
+        cluster=cluster_arn,
+        service=service_arn,
+        placementStrategy=placement_strategy,
+        forceNewDeployment=True,
+    )
+    return response
+
+
+def migrate_cluster_placement_strategy(profile, cluster_name, dry_run=False):
+    """
+    - Switch to the specified AWS profile/session
+    - Describe the requested cluster
+    - For each service, skip if:
+        * launchType == "FARGATE"
+        * service name starts with "sync"
+      Otherwise, if schedulingStrategy == "REPLICA" and
+      current placementStrategy != DESIRED_PLACEMENT_STRATEGY,
+      update it (or log if dry_run).
+    """
+    boto3.setup_default_session(profile_name=profile)
+
+    updated_service_count = 0
+
+    clusters = describe_clusters([cluster_name])
+    if not clusters:
+        print(f"No cluster found with the name {cluster_name}.")
+        return
+
+    cluster = clusters[0]
+    cluster_arn = cluster["clusterArn"]
+
+    # List all services in the cluster
+    service_arns = list_services_all(cluster_arn)
+    if not service_arns:
+        print(f"No services in cluster {cluster_name}.")
+        return
+
+    while service_arns:
+        batch = service_arns[:10]
+        service_arns = service_arns[10:]
+
+        services = describe_services(cluster_arn, batch)
+
+        for service in services:
+            service_name = service["serviceName"]
+            service_arn = service["serviceArn"]
+            scheduling_strategy = service["schedulingStrategy"]
+            launch_type = service.get("launchType", None)
+            current_placement_strategy = service.get("placementStrategy", [])
+
+            # Conditions to check:
+            # 1) schedulingStrategy must be "REPLICA"
+            # 2) launch type != "FARGATE"
+            # 3) service name does NOT start with "sync"
+            # 4) current_placement_strategy != DESIRED_PLACEMENT_STRATEGY
+            if (
+                scheduling_strategy == "REPLICA"
+                and launch_type != "FARGATE"
+                and not service_name.startswith("sync")
+                and current_placement_strategy != DESIRED_PLACEMENT_STRATEGY
+            ):
+                print(f"Found service to update: {service_name}")
+                print(f"Current placementStrategy: {current_placement_strategy}")
+
+                response = update_service_placement_strategy(
+                    cluster_arn=cluster_arn,
+                    service_arn=service_arn,
+                    placement_strategy=DESIRED_PLACEMENT_STRATEGY,
+                    dry_run=dry_run
+                )
+
+                if response["ResponseMetadata"]["HTTPStatusCode"] == 200:
+                    verb = "Would have updated" if dry_run else "Updated"
+                    print(f"{verb} {service_name} to the new placement strategy.\n")
+                    updated_service_count += 1
+                else:
+                    print(f"Error updating {service_name}. Response:")
+                    print(json.dumps(response, indent=2, default=str))
+
+    if dry_run:
+        print(f"\nDRY RUN complete. {updated_service_count} service(s) would be updated in cluster {cluster_name}.")
+    else:
+        print(f"\nDone. Updated placement strategy for {updated_service_count} service(s) in cluster {cluster_name}.")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Migrate ECS services to a new placement strategy.")
+    parser.add_argument("--aws-profile", required=True, help="AWS CLI profile name to use.")
+    parser.add_argument("--clusters", nargs="+", required=True, help="One or more ECS cluster names to migrate.")
+    parser.add_argument("--dry-run", action="store_true", default=False, help="Show which services would be updated without making changes.")
+    args = parser.parse_args()
+
+    aws_profile = args.aws_profile
+    clusters = args.clusters
+    dry_run = args.dry_run
+
+    for cluster in clusters:
+        migrate_cluster_placement_strategy(aws_profile, cluster, dry_run=dry_run)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
