@@ -1,0 +1,29 @@
+#!/usr/bin/env python3
+
+import argparse
+import boto3
+import sys
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--cluster", required=True, help="Name or ARN of the ECS cluster")
+    parser.add_argument("--service", required=True, help="Name or ARN of the ECS service")
+    args = parser.parse_args()
+
+    ecs_client = boto3.client("ecs")
+
+    response = ecs_client.update_service(
+        cluster=args.cluster,
+        service=args.service,
+        capacityProviderStrategy=[],
+        forceNewDeployment=True
+    )
+
+    print(f"Updated service '{args.service}' in cluster '{args.cluster}' to use launchType='EC2'.")
+    print("Response:")
+    print(response)
+
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
