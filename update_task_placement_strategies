@@ -81,7 +81,6 @@ def migrate_cluster_placement_strategy(profile, cluster_name, dry_run=False):
     - Describe the requested cluster
     - For each service, skip if:
         * launchType == "FARGATE"
-        * service name starts with "sync"
       Otherwise, if schedulingStrategy == "REPLICA" and
       current placementStrategy != DESIRED_PLACEMENT_STRATEGY,
       update it (or log if dry_run).
@@ -120,12 +119,10 @@ def migrate_cluster_placement_strategy(profile, cluster_name, dry_run=False):
             # Conditions to check:
             # 1) schedulingStrategy must be "REPLICA"
             # 2) launch type != "FARGATE"
-            # 3) service name does NOT start with "sync"
-            # 4) current_placement_strategy != DESIRED_PLACEMENT_STRATEGY
+            # 3) current_placement_strategy != DESIRED_PLACEMENT_STRATEGY
             if (
                 scheduling_strategy == "REPLICA"
                 and launch_type != "FARGATE"
-                and not service_name.startswith("sync")
                 and current_placement_strategy != DESIRED_PLACEMENT_STRATEGY
             ):
                 print(f"Found service to update: {service_name}")
