@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+
+import sys
+import argparse
+import boto3
+
+def get_all_event_buses(events_client):
+    """Retrieve all event buses in the account, handling NextToken manually."""
+    event_buses = []
+    response = events_client.list_event_buses()
+    event_buses.extend(response.get("EventBuses", []))
+
+    while "NextToken" in response and response["NextToken"]:
+        response = events_client.list_event_buses(NextToken=response["NextToken"])
+        event_buses.extend(response.get("EventBuses", []))
+
+    return event_buses
+
+def get_all_rules_for_bus(events_client, event_bus_name):
+    """Retrieve all rules for a given event bus, handling NextToken manually."""
+    rules = []
+    response = events_client.list_rules(EventBusName=event_bus_name)
+    rules.extend(response.get("Rules", []))
+
+    while "NextToken" in response and response["NextToken"]:
+        response = events_client.list_rules(EventBusName=event_bus_name, NextToken=response["NextToken"])
+        rules.extend(response.get("Rules", []))
+
+    return rules
+
+def get_targets_for_rule(events_client, rule_name, event_bus_name):
+    """Retrieve all targets for a given rule, handling NextToken manually."""
+    targets = []
+    response = events_client.list_targets_by_rule(Rule=rule_name, EventBusName=event_bus_name)
+    targets.extend(response.get("Targets", []))
+
+    while "NextToken" in response and response["NextToken"]:
+        response = events_client.list_targets_by_rule(
+            Rule=rule_name, EventBusName=event_bus_name, NextToken=response["NextToken"]
+        )
+        targets.extend(response.get("Targets", []))
+
+    return targets
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="List EventBridge rules in an account that invoke ECS tasks and show which ECS cluster they target."
+    )
+    # Optional: allow user to specify a profile or region
+    parser.add_argument("--profile", help="AWS CLI profile to use (optional)")
+    parser.add_argument("--region", help="AWS region to use (optional)")
+    args = parser.parse_args()
+
+    if args.profile:
+        boto3.setup_default_session(profile_name=args.profile)
+    if args.region:
+        events_client = boto3.client("events", region_name=args.region)
+    else:
+        events_client = boto3.client("events")
+
+    event_buses = get_all_event_buses(events_client)
+
+    for bus in event_buses:
+        bus_name = bus["Name"]
+        rules = get_all_rules_for_bus(events_client, bus_name)
+
+        for rule in rules:
+            rule_name = rule["Name"]
+            targets = get_targets_for_rule(events_client, rule_name, bus_name)
+
+            for target in targets:
+                # For ECS tasks, EcsParameters is present
+                if "EcsParameters" in target:
+                    cluster_arn = target["Arn"]  # Typically: arn:aws:ecs:REGION:ACCOUNT_ID:cluster/CLUSTER_NAME
+                    print(f"EventBus: {bus_name} | Rule: {rule_name} | Target ECS Cluster: {cluster_arn}")
+
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
