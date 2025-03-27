@@ -20,8 +20,8 @@ def stack_has_ecs_service(cf_client, stack_name):
 def get_template_body_string(cf_client, stack_name):
     """
     Retrieves the original template for the given stack, returning it as a string.
-    If the TemplateBody is already a string, we return it directly.
-    If it's a dict, we serialize it to JSON for consistency.
+    If the TemplateBody is already a string, return it directly.
+    If it's a dict, serialize it to JSON for consistency.
     """
     response = cf_client.get_template(StackName=stack_name, TemplateStage='Original')
     template_body = response["TemplateBody"]
@@ -34,9 +34,7 @@ def get_template_body_string(cf_client, stack_name):
         return template_body
 
 def compute_template_hash(template_str):
-    """
-    Computes an SHA-256 hex digest from the provided template string.
-    """
+    """Computes an SHA-256 hex digest from the provided template string."""
     return hashlib.sha256(template_str.encode('utf-8')).hexdigest()
 
 def get_stacks_grouped_by_desc_and_template(ignore_string=None, contains_string=None):
@@ -45,12 +43,15 @@ def get_stacks_grouped_by_desc_and_template(ignore_string=None, contains_string=
       1) Filters out descriptions containing 'ignore_string' if provided.
       2) Only processes the stack if the template body contains 'contains_string' (if provided).
       3) Groups them by (description, template-hash).
-    Returns a dictionary keyed by (description, template-hash), with the value being a set of stack names.
+
+    Returns a dict keyed by (description, template_hash),
+    whose value is a list of (stack_name, last_updated_str) tuples.
     """
     cf_client = boto3.client('cloudformation')
     paginator = cf_client.get_paginator('describe_stacks')
 
-    desc_hash_to_stacks = defaultdict(set)
+    # Dictionary { (description, template_hash): [(stack_name, last_updated_str), ...] }
+    desc_hash_to_stacks = defaultdict(list)
 
     for page in paginator.paginate():
         for stack in page['Stacks']:
@@ -72,11 +73,19 @@ def get_stacks_grouped_by_desc_and_template(ignore_string=None, contains_string=
             if contains_string and contains_string not in template_str:
                 continue
 
-            # Compute the hash if we haven't skipped
+            # Compute the template hash
             template_hash = compute_template_hash(template_str)
 
-            # Group by (description, template_hash)
-            desc_hash_to_stacks[(description, template_hash)].add(stack_name)
+            # Determine the "last updated" string
+            # If 'LastUpdatedTime' is missing, we say "never updated"
+            last_updated_time = stack.get('LastUpdatedTime')
+            if last_updated_time:
+                last_updated_str = last_updated_time.strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                last_updated_str = "never updated"
+
+            # Append (stack_name, last_updated_str) to the group
+            desc_hash_to_stacks[(description, template_hash)].append((stack_name, last_updated_str))
 
     return desc_hash_to_stacks
 
@@ -106,8 +115,11 @@ def main():
     for (description, t_hash) in sorted(desc_hash_dict.keys(), key=lambda x: (x[0], x[1])):
         short_hash = t_hash[:7]
         print(f" - {description} ({short_hash})")
-        for stack_name in sorted(desc_hash_dict[(description, t_hash)]):
-            print(f"    - {stack_name}")
+
+        # Sort stacks by name for consistent output
+        stacks_info = sorted(desc_hash_dict[(description, t_hash)], key=lambda x: x[0])
+        for stack_name, last_updated_str in stacks_info:
+            print(f"    - {stack_name} (Last updated: {last_updated_str})")
 
 if __name__ == "__main__":
     main()
