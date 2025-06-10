@@ -112,6 +112,11 @@ def main():
         "--ignore-prefix", action='append', default=[],
         help="Ignore stacks with names starting with this prefix. Can be specified multiple times."
     )
+    parser.add_argument(
+        "--template-names-only",
+        action='store_true',
+        help="Only print unique template descriptions and hashes (hides individual stacks)."
+    )
     args = parser.parse_args()
 
     desc_hash_dict, total_matched = get_stacks_grouped_by_desc_and_template(
@@ -126,10 +131,12 @@ def main():
         short_hash = t_hash[:7]
         print(f" - {description} ({short_hash})")
 
-        # Sort stacks by name for consistent output
-        stacks_info = sorted(desc_hash_dict[(description, t_hash)], key=lambda x: x[0])
-        for stack_name, last_updated_str in stacks_info:
-            print(f"    - {stack_name} (Last updated: {last_updated_str})")
+        # Unless --template-names-only was requested, list individual stacks
+        if not args.template_names_only:
+            # Sort stacks by name for consistent output
+            stacks_info = sorted(desc_hash_dict[(description, t_hash)], key=lambda x: x[0])
+            for stack_name, last_updated_str in stacks_info:
+                print(f"    - {stack_name} (Last updated: {last_updated_str})")
 
 if __name__ == "__main__":
     main()
