@@ -37,7 +37,7 @@ def compute_template_hash(template_str):
     """Computes an SHA-256 hex digest from the provided template string."""
     return hashlib.sha256(template_str.encode('utf-8')).hexdigest()
 
-def get_stacks_grouped_by_desc_and_template(ignore_string=None, contains_string=None):
+def get_stacks_grouped_by_desc_and_template(ignore_string=None, contains_string=None, ignore_stack_prefixes=None):
     """
     Retrieves all CF stacks that contain at least one ECS service. Then:
       1) Filters out descriptions containing 'ignore_string' if provided.
@@ -52,11 +52,15 @@ def get_stacks_grouped_by_desc_and_template(ignore_string=None, contains_string=
 
     # Dictionary { (description, template_hash): [(stack_name, last_updated_str), ...] }
     desc_hash_to_stacks = defaultdict(list)
+    total_matched = 0
 
     for page in paginator.paginate():
         for stack in page['Stacks']:
             stack_name = stack["StackName"]
             description = stack.get('Description', "").strip()
+
+            if ignore_stack_prefixes and any(stack_name.startswith(prefix) for prefix in ignore_stack_prefixes):
+                continue
 
             # Skip stacks without ECS services
             if not stack_has_ecs_service(cf_client, stack_name):
@@ -86,8 +90,9 @@ def get_stacks_grouped_by_desc_and_template(ignore_string=None, contains_string=
 
             # Append (stack_name, last_updated_str) to the group
             desc_hash_to_stacks[(description, template_hash)].append((stack_name, last_updated_str))
+            total_matched += 1
 
-    return desc_hash_to_stacks
+    return desc_hash_to_stacks, total_matched
 
 def main():
     parser = argparse.ArgumentParser(
@@ -103,14 +108,19 @@ def main():
         default=None,
         help="Only process stacks whose template contains this substring."
     )
+    parser.add_argument(
+        "--ignore-prefix", action='append', default=[],
+        help="Ignore stacks with names starting with this prefix. Can be specified multiple times."
+    )
     args = parser.parse_args()
 
-    desc_hash_dict = get_stacks_grouped_by_desc_and_template(
+    desc_hash_dict, total_matched = get_stacks_grouped_by_desc_and_template(
         ignore_string=args.ignore_string,
-        contains_string=args.contains_string
+        contains_string=args.contains_string,
+        ignore_stack_prefixes=args.ignore_prefix
     )
 
-    print("Unique CloudFormation Stack Descriptions (with AWS::ECS::Service):")
+    print(f"ECS-service stacks matched after filters: {total_matched}\n")
     # Sort by description, then by template hash
     for (description, t_hash) in sorted(desc_hash_dict.keys(), key=lambda x: (x[0], x[1])):
         short_hash = t_hash[:7]
