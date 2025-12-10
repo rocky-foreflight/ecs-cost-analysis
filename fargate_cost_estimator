@@ -1,0 +1,232 @@
+#!/usr/bin/env python3
+
+import argparse
+import sys
+import boto3
+
+# Fargate pricing for Linux/X86
+# Data from: https://aws.amazon.com/fargate/pricing/
+FARGATE_VCPU_HOURLY = 0.040480  # per vCPU per hour
+FARGATE_MEMORY_GB_HOURLY = 0.004445  # per GB per hour
+HOURS_PER_MONTH = 730  # Average hours per month
+
+
+def list_services(cluster_name):
+    """List all services in a given ECS cluster."""
+    ecs_client = boto3.client('ecs')
+    service_arns = []
+    next_token = None
+
+    while True:
+        list_kwargs = {
+            'cluster': cluster_name,
+            'maxResults': 100
+        }
+        if next_token:
+            list_kwargs['nextToken'] = next_token
+
+        response = ecs_client.list_services(**list_kwargs)
+        service_arns.extend(response.get("serviceArns", []))
+        next_token = response.get("nextToken")
+        if not next_token:
+            break
+
+    return service_arns
+
+
+def get_service_name_from_arn(service_arn):
+    """Extract service name from ARN."""
+    # ARN format: arn:aws:ecs:region:account:service/cluster/service-name
+    # or: arn:aws:ecs:region:account:service/service-name
+    parts = service_arn.split('/')
+    return parts[-1]
+
+
+def describe_services(cluster_name, service_arns):
+    """Describe multiple services to get their details."""
+    if not service_arns:
+        return []
+
+    ecs_client = boto3.client('ecs')
+    services = []
+
+    # Batch in groups of 10 (AWS limit)
+    BATCH_SIZE = 10
+    for i in range(0, len(service_arns), BATCH_SIZE):
+        batch = service_arns[i:i + BATCH_SIZE]
+        response = ecs_client.describe_services(
+            cluster=cluster_name,
+            services=batch
+        )
+        services.extend(response.get("services", []))
+
+    return services
+
+
+def describe_task_definition(task_definition_arn):
+    """Get task definition details including CPU and memory."""
+    ecs_client = boto3.client('ecs')
+    response = ecs_client.describe_task_definition(taskDefinition=task_definition_arn)
+    return response['taskDefinition']
+
+
+def parse_cpu_value(cpu_string):
+    """Convert ECS CPU string to vCPUs (e.g., '1024' -> 1.0, '256' -> 0.25)."""
+    if not cpu_string or cpu_string == '0':
+        return 0.0
+    return int(cpu_string) / 1024
+
+
+def parse_memory_value(memory_string):
+    """Convert ECS memory string to GB (e.g., '2048' -> 2.0)."""
+    if not memory_string or memory_string == '0':
+        return 0.0
+    return int(memory_string) / 1024
+
+
+def get_task_resources(task_def):
+    """
+    Extract vCPU and memory from task definition.
+    Tries task-level first, then sums container-level if needed.
+    """
+    # Try task-level CPU and memory first (Fargate required, EC2 optional)
+    task_cpu = task_def.get('cpu', '0')
+    task_memory = task_def.get('memory', '0')
+
+    vcpus = parse_cpu_value(task_cpu)
+    memory_gb = parse_memory_value(task_memory)
+
+    # If task-level not set, sum from container definitions
+    if vcpus == 0.0 or memory_gb == 0.0:
+        container_vcpus = 0.0
+        container_memory_gb = 0.0
+
+        for container in task_def.get('containerDefinitions', []):
+            if 'cpu' in container:
+                container_vcpus += parse_cpu_value(str(container['cpu']))
+            if 'memory' in container:
+                container_memory_gb += parse_memory_value(str(container['memory']))
+
+        # Use container sums if we found any
+        if container_vcpus > 0.0:
+            vcpus = container_vcpus
+        if container_memory_gb > 0.0:
+            memory_gb = container_memory_gb
+
+    return vcpus, memory_gb
+
+
+def calculate_fargate_cost(vcpus, memory_gb, task_count):
+    """Calculate monthly Fargate cost for given resources."""
+    hourly_cost = (vcpus * FARGATE_VCPU_HOURLY) + (memory_gb * FARGATE_MEMORY_GB_HOURLY)
+    monthly_cost = hourly_cost * HOURS_PER_MONTH * task_count
+    return monthly_cost, hourly_cost
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Estimate monthly Fargate costs for ECS services matching a prefix."
+    )
+    parser.add_argument(
+        "--profile",
+        required=True,
+        help="AWS profile to use"
+    )
+    parser.add_argument(
+        "--cluster",
+        required=True,
+        help="ECS cluster name"
+    )
+    parser.add_argument(
+        "--service-prefix",
+        required=True,
+        help="Service name prefix(es) to match (case-insensitive, comma-separated for multiple)"
+    )
+
+    args = parser.parse_args()
+
+    # Set up AWS session with profile
+    boto3.setup_default_session(profile_name=args.profile)
+
+    cluster_name = args.cluster
+
+    # Split by comma and strip whitespace, convert to lowercase
+    prefixes = [p.strip().lower() for p in args.service_prefix.split(',')]
+
+    prefix_display = "', '".join([p.strip() for p in args.service_prefix.split(',')])
+    print(f"\nSearching for services in cluster '{cluster_name}' starting with '{prefix_display}'...\n")
+
+    # List all services in cluster
+    service_arns = list_services(cluster_name)
+    print(f"Found {len(service_arns)} total services in cluster.\n")
+
+    # Filter services by prefix (case-insensitive)
+    matching_service_arns = []
+    for arn in service_arns:
+        service_name = get_service_name_from_arn(arn)
+        service_name_lower = service_name.lower()
+        # Check if service name starts with any of the prefixes
+        if any(service_name_lower.startswith(prefix) for prefix in prefixes):
+            matching_service_arns.append(arn)
+
+    if not matching_service_arns:
+        print(f"No services found matching prefix(es) '{prefix_display}'")
+        return 0
+
+    print(f"Found {len(matching_service_arns)} services matching prefix(es) '{prefix_display}':\n")
+
+    # Describe all matching services
+    services = describe_services(cluster_name, matching_service_arns)
+
+    total_monthly_cost = 0
+    service_costs = []
+
+    for service in services:
+        service_name = service['serviceName']
+        task_definition_arn = service['taskDefinition']
+        running_count = service.get('runningCount', 0)
+
+        # Get task definition details
+        task_def = describe_task_definition(task_definition_arn)
+
+        # Extract CPU and memory (from task-level or container-level)
+        vcpus, memory_gb = get_task_resources(task_def)
+
+        # Calculate cost
+        monthly_cost, hourly_cost = calculate_fargate_cost(vcpus, memory_gb, running_count)
+        total_monthly_cost += monthly_cost
+
+        service_costs.append({
+            'name': service_name,
+            'vcpus': vcpus,
+            'memory_gb': memory_gb,
+            'running_count': running_count,
+            'hourly_cost': hourly_cost,
+            'monthly_cost': monthly_cost
+        })
+
+    # Print results
+    print("=" * 100)
+    print(f"{'Service Name':<40} {'vCPUs':<8} {'Memory':<10} {'Tasks':<8} {'$/hour':<12} {'$/month':<12}")
+    print("=" * 100)
+
+    for svc in sorted(service_costs, key=lambda x: x['monthly_cost'], reverse=True):
+        print(
+            f"{svc['name']:<40} "
+            f"{svc['vcpus']:<8.2f} "
+            f"{svc['memory_gb']:<10.2f} "
+            f"{svc['running_count']:<8} "
+            f"${svc['hourly_cost']:<11.4f} "
+            f"${svc['monthly_cost']:<11.2f}"
+        )
+
+    print("=" * 100)
+    print(f"{'TOTAL ESTIMATED MONTHLY FARGATE COST':<79} ${total_monthly_cost:>18.2f}")
+    print("=" * 100)
+    print()
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
